@@ -14,6 +14,8 @@
 
 #include <list>
 #include <vector>
+#include <algorithm>
+#include <string>
 
 #include <DirectXMath.h>
 using namespace DirectX;

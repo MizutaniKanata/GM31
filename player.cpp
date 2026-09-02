@@ -22,6 +22,7 @@ void Player::Init()
 
 	m_AnimationModel = AddComponent<AnimationModel>( this );
 	m_AnimationModel->Load( "asset\\model\\Akai.fbx" );
+	m_AnimationModel->LoadAnimation( "asset\\model\\Akai_Idle.fbx", "Idle" );
 	m_AnimationModel->LoadAnimation( "asset\\model\\Akai_Run.fbx", "Run" );
 
 	// シェーダー読込
@@ -49,15 +50,38 @@ void Player::Update()
 	right.y = 0.0f; // 水平移動のためにY成分をゼロにする
 	right.normalize();
 
+	bool isMove = false;
+
 	// キー入力で加速
 	if ( Input::GetKeyPress( 'D' ) )
+	{
 		m_Velocity += right * 50.0f * dt;
+		isMove = true;
+	}
 	if ( Input::GetKeyPress( 'A' ) )
+	{
 		m_Velocity -= right * 50.0f * dt;
+		isMove = true;
+	}
 	if ( Input::GetKeyPress( 'W' ) )
+	{
 		m_Velocity += forward * 50.0f * dt;
+		isMove = true;
+	}
 	if ( Input::GetKeyPress( 'S' ) )
+	{
 		m_Velocity -= forward * 50.0f * dt;
+		isMove = true;
+	}
+
+	if ( isMove )
+	{
+		SetAnimation( "Run" );
+	}
+	else
+	{
+		SetAnimation( "Idle" );
+	}
 
 	// 移動方向に回転
 	m_Rotation.y = atan2f( m_Velocity.x, m_Velocity.z );
@@ -263,13 +287,13 @@ void Player::Draw()
 	// マトリクス設定
 	XMMATRIX world, scale, rot, trans;
 	scale = XMMatrixScaling( m_Scale.x, m_Scale.y, m_Scale.z );
-	rot = XMMatrixRotationRollPitchYaw( m_Rotation.x, m_Rotation.y + XM_PI, m_Rotation.z );
+	rot = XMMatrixRotationRollPitchYaw( m_Rotation.x, m_Rotation.y, m_Rotation.z );
 	trans = XMMatrixTranslation( m_Position.x, m_Position.y, m_Position.z );
 	world = scale * rot * trans;
 
 	Renderer::SetWorldMatrix( world );
 
-	m_AnimationModel->Update( "Run", m_AnimationFrame );
+	m_AnimationModel->Update( m_AnimationName.c_str(), m_AnimationFrame );
 
 	GameObject::Draw(); // 継承元のDraw()を呼び出す
 }
@@ -281,4 +305,13 @@ void Player::Uninit()
 	m_PixelShader->Release();
 
 	GameObject::Uninit();
+}
+
+void Player::SetAnimation( const char* animationName )
+{
+	if ( m_AnimationName != animationName )
+	{
+		m_AnimationName = animationName;
+		m_AnimationFrame = 0;
+	}
 }

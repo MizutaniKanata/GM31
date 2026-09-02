@@ -26,9 +26,12 @@ private:
 
 	class AnimationModel* m_AnimationModel;
 	int m_AnimationFrame{};
+
+	std::string m_AnimationName;
 public:
 	void Init() override;
 	void Update() override;
 	void Draw() override;
 	void Uninit() override;
+	void SetAnimation( const char* animationName );
 };
