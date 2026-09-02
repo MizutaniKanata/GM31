@@ -18,14 +18,14 @@ private:
 
 	// 隕石ループ生成用
 	bool m_MeteorLoop = false;
-	float m_MeteorSpawnTimer = 0.0f;
+	float m_MeteorSpawnTimer{};
 
 	// 花火ループ生成用
 	bool m_FireworkLoop = false;
-	float m_FireworkSpawnTimer = 0.0f;
+	float m_FireworkSpawnTimer{};
 
 	class AnimationModel* m_AnimationModel;
-	int m_AnimationFrame = 0;
+	int m_AnimationFrame{};
 public:
 	void Init() override;
 	void Update() override;
