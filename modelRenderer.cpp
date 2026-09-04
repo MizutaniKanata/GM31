@@ -1,824 +1,1500 @@
 #define _CRT_SECURE_NO_WARNINGS
-#include <stdio.h>
+
 #include <Windows.h>
-#include <stdlib.h>
 #include <shlwapi.h>
-#pragma comment(lib, "shlwapi.lib")
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "main.h"
 #include "renderer.h"
 #include "modelRenderer.h"
 
+#pragma comment(lib, "shlwapi.lib")
+
 namespace
 {
-    bool ResolveFilePath(const char* inputPath, char* outPath, size_t outSize)
-    {
-        if (inputPath == nullptr || outPath == nullptr || outSize == 0)
-        {
-            return false;
-        }
+	constexpr size_t kPathBufferSize = MAX_PATH;
+	constexpr int kMaxFaceCorners = 64;
 
-        outPath[0] = '\0';
+	bool ResolveFilePath(
+		const char* inputPath,
+		char* outPath,
+		size_t outPathSize
+	)
+	{
+		if ( inputPath == nullptr ||
+			outPath == nullptr ||
+			outPathSize == 0 )
+		{
+			return false;
+		}
 
-        if (PathIsRelativeA(inputPath) == FALSE)
-        {
-            if (PathFileExistsA(inputPath))
-            {
-                strcpy_s(outPath, outSize, inputPath);
-                return true;
-            }
-            return false;
-        }
+		outPath[ 0 ] = '\0';
 
-        if (PathFileExistsA(inputPath))
-        {
-            strcpy_s(outPath, outSize, inputPath);
-            return true;
-        }
+		// 絶対パスなら、そのまま存在確認する
+		if ( PathIsRelativeA( inputPath ) == FALSE )
+		{
+			if ( PathFileExistsA( inputPath ) )
+			{
+				strcpy_s( outPath, outPathSize, inputPath );
+				return true;
+			}
 
-        char exePath[MAX_PATH];
-        if (GetModuleFileNameA(nullptr, exePath, MAX_PATH) == 0)
-        {
-            return false;
-        }
+			return false;
+		}
 
-        char baseDir[MAX_PATH];
-        strcpy_s(baseDir, exePath);
-        PathRemoveFileSpecA(baseDir);
+		// カレントディレクトリ基準で見つかる場合
+		if ( PathFileExistsA( inputPath ) )
+		{
+			strcpy_s( outPath, outPathSize, inputPath );
+			return true;
+		}
 
-        for (int depth = 0; depth < 8; depth++)
-        {
-            char candidate[MAX_PATH];
-            if (PathCombineA(candidate, baseDir, inputPath) != nullptr && PathFileExistsA(candidate))
-            {
-                strcpy_s(outPath, outSize, candidate);
-                return true;
-            }
+		// 実行ファイルのあるフォルダから上方向へ探索する
+		char exePath[ MAX_PATH ]{};
 
-            if (!PathRemoveFileSpecA(baseDir))
-            {
-                break;
-            }
-        }
+		if ( GetModuleFileNameA( nullptr, exePath, MAX_PATH ) == 0 )
+		{
+			return false;
+		}
 
-        return false;
-    }
+		char baseDirectory[ MAX_PATH ]{};
+		strcpy_s( baseDirectory, exePath );
+		PathRemoveFileSpecA( baseDirectory );
+
+		for ( int depth = 0; depth < 8; ++depth )
+		{
+			char candidatePath[ MAX_PATH ]{};
+
+			if ( PathCombineA(
+				candidatePath,
+				baseDirectory,
+				inputPath
+				) != nullptr &&
+				PathFileExistsA( candidatePath ) )
+			{
+				strcpy_s( outPath, outPathSize, candidatePath );
+				return true;
+			}
+
+			if ( !PathRemoveFileSpecA( baseDirectory ) )
+			{
+				break;
+			}
+		}
+
+		return false;
+	}
+
+	void DebugPrint( const char* format, ... )
+	{
+		char buffer[ 2048 ]{};
+
+		va_list args;
+		va_start( args, format );
+
+		vsprintf_s(
+			buffer,
+			_countof( buffer ),
+			format,
+			args
+		);
+
+		va_end( args );
+
+		OutputDebugStringA( buffer );
+	}
+
+	bool ParseObjIndex(
+		const char* token,
+		int& positionIndex,
+		int& texcoordIndex,
+		int& normalIndex
+	)
+	{
+		positionIndex = 0;
+		texcoordIndex = 0;
+		normalIndex = 0;
+
+		if ( token == nullptr )
+		{
+			return false;
+		}
+
+		// v/vt/vn
+		if ( sscanf_s(
+			token,
+			"%d/%d/%d",
+			&positionIndex,
+			&texcoordIndex,
+			&normalIndex
+			) == 3 )
+		{
+			return true;
+		}
+
+		// v//vn
+		if ( sscanf_s(
+			token,
+			"%d//%d",
+			&positionIndex,
+			&normalIndex
+			) == 2 )
+		{
+			texcoordIndex = 0;
+			return true;
+		}
+
+		// v/vt
+		if ( sscanf_s(
+			token,
+			"%d/%d",
+			&positionIndex,
+			&texcoordIndex
+			) == 2 )
+		{
+			normalIndex = 0;
+			return true;
+		}
+
+		// v
+		if ( sscanf_s(
+			token,
+			"%d",
+			&positionIndex
+			) == 1 )
+		{
+			texcoordIndex = 0;
+			normalIndex = 0;
+			return true;
+		}
+
+		return false;
+	}
+
+	int ConvertObjIndex(
+		int objIndex,
+		unsigned int arraySize
+	)
+	{
+		if ( objIndex > 0 )
+		{
+			const int index = objIndex - 1;
+
+			if ( index >= 0 &&
+				static_cast<unsigned int>( index ) < arraySize )
+			{
+				return index;
+			}
+
+			return -1;
+		}
+
+		// OBJの負インデックス: -1 は末尾要素
+		if ( objIndex < 0 )
+		{
+			const int index =
+				static_cast<int>( arraySize ) + objIndex;
+
+			if ( index >= 0 &&
+				static_cast<unsigned int>( index ) < arraySize )
+			{
+				return index;
+			}
+		}
+
+		return -1;
+	}
+
+	void InitializeDefaultMaterial( MODEL_MATERIAL& material )
+	{
+		material = {};
+
+		material.Material.Ambient =
+			XMFLOAT4( 0.2f, 0.2f, 0.2f, 1.0f );
+
+		material.Material.Diffuse =
+			XMFLOAT4( 1.0f, 1.0f, 1.0f, 1.0f );
+
+		material.Material.Specular =
+			XMFLOAT4( 0.0f, 0.0f, 0.0f, 1.0f );
+
+		material.Material.Emission =
+			XMFLOAT4( 0.0f, 0.0f, 0.0f, 1.0f );
+
+		material.Material.Shininess = 0.0f;
+		material.Material.TextureEnable = FALSE;
+
+		strcpy_s( material.Name, "default" );
+		material.TextureName[ 0 ] = '\0';
+		material.Texture = nullptr;
+	}
+
+	void AssignMaterialByName(
+		MODEL_MATERIAL& destination,
+		const char* materialName,
+		const MODEL_MATERIAL* materialArray,
+		unsigned int materialNum
+	)
+	{
+		InitializeDefaultMaterial( destination );
+
+		if ( materialName == nullptr )
+		{
+			return;
+		}
+
+		strcpy_s( destination.Name, materialName );
+
+		for ( unsigned int i = 0; i < materialNum; ++i )
+		{
+			if ( strcmp( materialName, materialArray[ i ].Name ) == 0 )
+			{
+				destination = materialArray[ i ];
+				destination.Texture = nullptr;
+				return;
+			}
+		}
+	}
 }
-
 
 std::unordered_map<std::string, MODEL*> ModelRenderer::m_ModelPool;
 
-
-
-
 void ModelRenderer::Draw()
 {
-    if (m_Model == nullptr || m_Model->VertexBuffer == nullptr || m_Model->IndexBuffer == nullptr || m_Model->SubsetArray == nullptr || m_Model->SubsetNum == 0)
-    {
-        return;
-    }
+	if ( m_Model == nullptr )
+	{
+		OutputDebugStringA(
+			"[ModelRenderer] Draw skipped: m_Model is nullptr\n"
+		);
+		return;
+	}
 
-    // 頂点バッファ設定
-    UINT stride = sizeof(VERTEX_3D);
-    UINT offset = 0;
-    Renderer::GetDeviceContext()->IASetVertexBuffers(0, 1, &m_Model->VertexBuffer, &stride, &offset);
+	if ( m_Model->VertexBuffer == nullptr )
+	{
+		OutputDebugStringA(
+			"[ModelRenderer] Draw skipped: VertexBuffer is nullptr\n"
+		);
+		return;
+	}
 
-    // インデックスバッファ設定
-    Renderer::GetDeviceContext()->IASetIndexBuffer(m_Model->IndexBuffer, DXGI_FORMAT_R32_UINT, 0);
+	if ( m_Model->IndexBuffer == nullptr )
+	{
+		OutputDebugStringA(
+			"[ModelRenderer] Draw skipped: IndexBuffer is nullptr\n"
+		);
+		return;
+	}
 
-    // プリミティブトポロジー設定
-    Renderer::GetDeviceContext()->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	if ( m_Model->SubsetArray == nullptr )
+	{
+		OutputDebugStringA(
+			"[ModelRenderer] Draw skipped: SubsetArray is nullptr\n"
+		);
+		return;
+	}
 
-    for (unsigned int i = 0; i < m_Model->SubsetNum; i++)
-    {
-        if (m_Model->SubsetArray[i].IndexNum == 0)
-        {
-            continue;
-        }
+	if ( m_Model->SubsetNum == 0 )
+	{
+		OutputDebugStringA(
+			"[ModelRenderer] Draw skipped: SubsetNum is 0\n"
+		);
+		return;
+	}
 
-        // マテリアル設定 (shader reads MATERIAL::TextureEnable, not MODEL_MATERIAL::TextureEnable)
-        MATERIAL mat = m_Model->SubsetArray[i].Material.Material;
-        ID3D11ShaderResourceView* texture = m_Model->SubsetArray[i].Material.Texture;
-        mat.TextureEnable = texture ? TRUE : FALSE;
-        Renderer::SetMaterial(mat);
+	ID3D11DeviceContext* context =
+		Renderer::GetDeviceContext();
 
-        // テクスチャ設定（無い場合はスロットをクリアして他オブジェクトのテクスチャを参照しない）
-        if (texture)
-        {
-            Renderer::GetDeviceContext()->PSSetShaderResources(0, 1, &texture);
-        }
-        else
-        {
-            ID3D11ShaderResourceView* nullTex = nullptr;
-            Renderer::GetDeviceContext()->PSSetShaderResources(0, 1, &nullTex);
-        }
+	// 頂点バッファ設定
+	UINT stride = sizeof( VERTEX_3D );
+	UINT offset = 0;
 
-        // ポリゴン描画
-        Renderer::GetDeviceContext()->DrawIndexed(m_Model->SubsetArray[i].IndexNum, m_Model->SubsetArray[i].StartIndex, 0);
-    }
+	context->IASetVertexBuffers(
+		0,
+		1,
+		&m_Model->VertexBuffer,
+		&stride,
+		&offset
+	);
+
+	// インデックスバッファ設定
+	context->IASetIndexBuffer(
+		m_Model->IndexBuffer,
+		DXGI_FORMAT_R32_UINT,
+		0
+	);
+
+	// 三角形リストとして描画
+	context->IASetPrimitiveTopology(
+		D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST
+	);
+
+	for ( unsigned int subsetIndex = 0;
+		 subsetIndex < m_Model->SubsetNum;
+		 ++subsetIndex )
+	{
+		SUBSET& subset =
+			m_Model->SubsetArray[ subsetIndex ];
+
+		if ( subset.IndexNum == 0 )
+		{
+			continue;
+		}
+
+		MATERIAL material = subset.Material.Material;
+
+		ID3D11ShaderResourceView* texture =
+			subset.Material.Texture;
+
+		material.TextureEnable =
+			texture != nullptr ? TRUE : FALSE;
+
+		Renderer::SetMaterial( material );
+
+		// テクスチャ未設定ならt0を明示的にnullptrへする
+		context->PSSetShaderResources(
+			0,
+			1,
+			&texture
+		);
+
+		context->DrawIndexed(
+			subset.IndexNum,
+			subset.StartIndex,
+			0
+		);
+	}
 }
 
-void ModelRenderer::Preload(const char* FileName)
+void ModelRenderer::Preload( const char* fileName )
 {
-    if (m_ModelPool.count(FileName) > 0)
-    {
-        return;
-    }
+	if ( fileName == nullptr )
+	{
+		return;
+	}
 
-    MODEL* model = new MODEL;
-    LoadModel(FileName, model);
+	char resolvedPath[ MAX_PATH ]{};
+
+	if ( !ResolveFilePath(
+		fileName,
+		resolvedPath,
+		_countof( resolvedPath )
+		) )
+	{
+		DebugPrint(
+			"[ModelRenderer] Preload failed: file not found: %s\n",
+			fileName
+		);
+		return;
+	}
+
+	const std::string cacheKey = resolvedPath;
+
+	if ( m_ModelPool.find( cacheKey ) != m_ModelPool.end() )
+	{
+		return;
+	}
+
+	MODEL* model = new MODEL{};
+
+	if ( !LoadModel( resolvedPath, model ) )
+	{
+		ReleaseModel( model );
+
+		DebugPrint(
+			"[ModelRenderer] Preload failed: %s\n",
+			resolvedPath
+		);
+
+		return;
+	}
+
+	m_ModelPool.emplace( cacheKey, model );
+
+	DebugPrint(
+		"[ModelRenderer] Preload success: %s\n",
+		resolvedPath
+	);
 }
-
-
-
-
 
 void ModelRenderer::UnloadAll()
 {
-    for (std::pair<const std::string, MODEL*> pair : m_ModelPool)
-    {
-        pair.second->VertexBuffer->Release();
-        pair.second->IndexBuffer->Release();
+	for ( auto& pair : m_ModelPool )
+	{
+		ReleaseModel( pair.second );
+	}
 
-        for (unsigned int i = 0; i < pair.second->SubsetNum; i++)
-        {
-            if (pair.second->SubsetArray[i].Material.Texture)
-            {
-                pair.second->SubsetArray[i].Material.Texture->Release();
-            }
-        }
-
-        delete[] pair.second->SubsetArray;
-        delete pair.second;
-    }
-
-    m_ModelPool.clear();
+	m_ModelPool.clear();
 }
 
-void ModelRenderer::Load(const char* FileName)
+void ModelRenderer::Load( const char* fileName )
 {
-    if (m_ModelPool.count(FileName) > 0)
-    {
-        m_Model = m_ModelPool[FileName];
-        return;
-    }
+	m_Model = nullptr;
 
-    m_Model = new MODEL;
-    LoadModel(FileName, m_Model);
+	if ( fileName == nullptr )
+	{
+		return;
+	}
 
-    m_ModelPool[FileName] = m_Model;
+	char resolvedPath[ MAX_PATH ]{};
+
+	if ( !ResolveFilePath(
+		fileName,
+		resolvedPath,
+		_countof( resolvedPath )
+		) )
+	{
+		DebugPrint(
+			"[ModelRenderer] Load failed: file not found: %s\n",
+			fileName
+		);
+
+		return;
+	}
+
+	const std::string cacheKey = resolvedPath;
+
+	const auto found =
+		m_ModelPool.find( cacheKey );
+
+	if ( found != m_ModelPool.end() )
+	{
+		m_Model = found->second;
+		return;
+	}
+
+	MODEL* model = new MODEL{};
+
+	if ( !LoadModel( resolvedPath, model ) )
+	{
+		ReleaseModel( model );
+
+		DebugPrint(
+			"[ModelRenderer] LoadModel failed: %s\n",
+			resolvedPath
+		);
+
+		return;
+	}
+
+	m_ModelPool.emplace( cacheKey, model );
+	m_Model = model;
+
+	DebugPrint(
+		"[ModelRenderer] Load success: %s\n",
+		resolvedPath
+	);
 }
 
-
-void ModelRenderer::LoadModel(const char* FileName, MODEL* Model)
+bool ModelRenderer::LoadModel(
+	const char* fileName,
+	MODEL* model
+)
 {
-    char resolvedModelPath[MAX_PATH];
-    const char* modelPath = FileName;
-    if (ResolveFilePath(FileName, resolvedModelPath, _countof(resolvedModelPath)))
-    {
-        modelPath = resolvedModelPath;
-    }
+	if ( fileName == nullptr || model == nullptr )
+	{
+		return false;
+	}
 
-    MODEL_OBJ modelObj;
-    LoadObj(modelPath, &modelObj);
+	MODEL_OBJ modelObj{};
 
-    // Debug info to confirm model data loaded
-    {
-        char buf[256];
-        sprintf_s(buf, "[ModelRenderer] %s V=%u I=%u S=%u\n",
-            modelPath ? modelPath : "(null)",
-            modelObj.VertexNum, modelObj.IndexNum, modelObj.SubsetNum);
-        OutputDebugStringA(buf);
-    }
+	if ( !LoadObj( fileName, &modelObj ) )
+	{
+		return false;
+	}
 
-    if (modelObj.VertexNum == 0 || modelObj.IndexNum == 0 || modelObj.VertexArray == nullptr || modelObj.IndexArray == nullptr)
-    {
-        // Avoid creating invalid buffers; keep model empty
-        Model->VertexBuffer = nullptr;
-        Model->IndexBuffer = nullptr;
-        Model->SubsetArray = nullptr;
-        Model->SubsetNum = 0;
-        return;
-    }
+	DebugPrint(
+		"[ModelRenderer] OBJ loaded: %s, vertices=%u, indices=%u, subsets=%u\n",
+		fileName,
+		modelObj.VertexNum,
+		modelObj.IndexNum,
+		modelObj.SubsetNum
+	);
 
-    // 頂点バッファ生成
-    {
-        D3D11_BUFFER_DESC bd;
-        ZeroMemory(&bd, sizeof(bd));
-        bd.Usage = D3D11_USAGE_DEFAULT;
-        bd.ByteWidth = sizeof(VERTEX_3D) * modelObj.VertexNum;
-        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        bd.CPUAccessFlags = 0;
+	if ( modelObj.VertexArray == nullptr ||
+		modelObj.IndexArray == nullptr ||
+		modelObj.SubsetArray == nullptr ||
+		modelObj.VertexNum == 0 ||
+		modelObj.IndexNum == 0 ||
+		modelObj.SubsetNum == 0 )
+	{
+		delete[] modelObj.VertexArray;
+		delete[] modelObj.IndexArray;
+		delete[] modelObj.SubsetArray;
 
-        D3D11_SUBRESOURCE_DATA sd;
-        ZeroMemory(&sd, sizeof(sd));
-        sd.pSysMem = modelObj.VertexArray;
+		return false;
+	}
 
-        Renderer::GetDevice()->CreateBuffer(&bd, &sd, &Model->VertexBuffer);
-    }
+	ID3D11Device* device = Renderer::GetDevice();
 
-    // インデックスバッファ生成
-    {
-        D3D11_BUFFER_DESC bd;
-        ZeroMemory(&bd, sizeof(bd));
-        bd.Usage = D3D11_USAGE_DEFAULT;
-        bd.ByteWidth = sizeof(unsigned int) * modelObj.IndexNum;
-        bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
-        bd.CPUAccessFlags = 0;
+	if ( device == nullptr )
+	{
+		delete[] modelObj.VertexArray;
+		delete[] modelObj.IndexArray;
+		delete[] modelObj.SubsetArray;
 
-        D3D11_SUBRESOURCE_DATA sd;
-        ZeroMemory(&sd, sizeof(sd));
-        sd.pSysMem = modelObj.IndexArray;
+		OutputDebugStringA(
+			"[ModelRenderer] LoadModel failed: D3D device is nullptr\n"
+		);
 
-        Renderer::GetDevice()->CreateBuffer(&bd, &sd, &Model->IndexBuffer);
-    }
+		return false;
+	}
 
-    // サブセット設定
-    {
-        Model->SubsetArray = new SUBSET[modelObj.SubsetNum];
-        Model->SubsetNum = modelObj.SubsetNum;
+	// 頂点バッファ作成
+	{
+		D3D11_BUFFER_DESC vertexBufferDesc{};
+		vertexBufferDesc.Usage = D3D11_USAGE_DEFAULT;
+		vertexBufferDesc.ByteWidth =
+			sizeof( VERTEX_3D ) * modelObj.VertexNum;
+		vertexBufferDesc.BindFlags =
+			D3D11_BIND_VERTEX_BUFFER;
 
-        for (unsigned int i = 0; i < modelObj.SubsetNum; i++)
-        {
-            Model->SubsetArray[i].StartIndex = modelObj.SubsetArray[i].StartIndex;
-            Model->SubsetArray[i].IndexNum = modelObj.SubsetArray[i].IndexNum;
+		D3D11_SUBRESOURCE_DATA vertexData{};
+		vertexData.pSysMem = modelObj.VertexArray;
 
-            Model->SubsetArray[i].Material.Material = modelObj.SubsetArray[i].Material.Material;
-            Model->SubsetArray[i].Material.Material.TextureEnable = FALSE;
+		const HRESULT result = device->CreateBuffer(
+			&vertexBufferDesc,
+			&vertexData,
+			&model->VertexBuffer
+		);
 
-            Model->SubsetArray[i].Material.Texture = nullptr;
+		if ( FAILED( result ) )
+		{
+			DebugPrint(
+				"[ModelRenderer] Create vertex buffer failed: 0x%08X\n",
+				static_cast<unsigned int>( result )
+			);
 
-            // テクスチャ読み込み
-            TexMetadata metadata;
-            ScratchImage image;
-            char resolvedTexPath[MAX_PATH];
-            const char* texName = modelObj.SubsetArray[i].Material.TextureName;
-            if (ResolveFilePath(texName, resolvedTexPath, _countof(resolvedTexPath)))
-            {
-                texName = resolvedTexPath;
-            }
-            if (texName != nullptr && texName[0] != '\0')
-            {
-                wchar_t wc[MAX_PATH];
-                size_t converted = 0;
-                wc[0] = L'\0';
-                mbstowcs_s(&converted, wc, _countof(wc), texName, _TRUNCATE);
+			delete[] modelObj.VertexArray;
+			delete[] modelObj.IndexArray;
+			delete[] modelObj.SubsetArray;
 
-                if (SUCCEEDED(LoadFromWICFile(wc, WIC_FLAGS_NONE, &metadata, image)))
-                {
-                    CreateShaderResourceView(
-                        Renderer::GetDevice(),
-                        image.GetImages(),
-                        image.GetImageCount(),
-                        metadata,
-                        &Model->SubsetArray[i].Material.Texture
-                    );
-                }
-            }
+			return false;
+		}
+	}
 
-            Model->SubsetArray[i].Material.Material.TextureEnable =
-                Model->SubsetArray[i].Material.Texture ? TRUE : FALSE;
-        }
-    }
+	// インデックスバッファ作成
+	{
+		D3D11_BUFFER_DESC indexBufferDesc{};
+		indexBufferDesc.Usage = D3D11_USAGE_DEFAULT;
+		indexBufferDesc.ByteWidth =
+			sizeof( unsigned int ) * modelObj.IndexNum;
+		indexBufferDesc.BindFlags =
+			D3D11_BIND_INDEX_BUFFER;
 
-    delete[] modelObj.VertexArray;
-    delete[] modelObj.IndexArray;
-    delete[] modelObj.SubsetArray;
+		D3D11_SUBRESOURCE_DATA indexData{};
+		indexData.pSysMem = modelObj.IndexArray;
+
+		const HRESULT result = device->CreateBuffer(
+			&indexBufferDesc,
+			&indexData,
+			&model->IndexBuffer
+		);
+
+		if ( FAILED( result ) )
+		{
+			DebugPrint(
+				"[ModelRenderer] Create index buffer failed: 0x%08X\n",
+				static_cast<unsigned int>( result )
+			);
+
+			model->VertexBuffer->Release();
+			model->VertexBuffer = nullptr;
+
+			delete[] modelObj.VertexArray;
+			delete[] modelObj.IndexArray;
+			delete[] modelObj.SubsetArray;
+
+			return false;
+		}
+	}
+
+	model->SubsetArray =
+		new SUBSET[ modelObj.SubsetNum ]{};
+
+	model->SubsetNum = modelObj.SubsetNum;
+
+	for ( unsigned int subsetIndex = 0;
+		 subsetIndex < modelObj.SubsetNum;
+		 ++subsetIndex )
+	{
+		model->SubsetArray[ subsetIndex ] =
+			modelObj.SubsetArray[ subsetIndex ];
+
+		model->SubsetArray[ subsetIndex ]
+			.Material.Texture = nullptr;
+
+		const char* texturePath =
+			modelObj.SubsetArray[ subsetIndex ]
+			.Material.TextureName;
+
+		if ( texturePath == nullptr || texturePath[ 0 ] == '\0' )
+		{
+			model->SubsetArray[ subsetIndex ]
+				.Material.Material.TextureEnable = FALSE;
+
+			continue;
+		}
+
+		char resolvedTexturePath[ MAX_PATH ]{};
+
+		if ( !ResolveFilePath(
+			texturePath,
+			resolvedTexturePath,
+			_countof( resolvedTexturePath )
+			) )
+		{
+			DebugPrint(
+				"[ModelRenderer] Texture not found: %s\n",
+				texturePath
+			);
+
+			model->SubsetArray[ subsetIndex ]
+				.Material.Material.TextureEnable = FALSE;
+
+			continue;
+		}
+
+		wchar_t wideTexturePath[ MAX_PATH ]{};
+
+		const size_t converted =
+			mbstowcs(
+				wideTexturePath,
+				resolvedTexturePath,
+				_countof( wideTexturePath ) - 1
+			);
+
+		if ( converted == static_cast<size_t>( -1 ) )
+		{
+			DebugPrint(
+				"[ModelRenderer] Texture path conversion failed: %s\n",
+				resolvedTexturePath
+			);
+
+			continue;
+		}
+
+		wideTexturePath[ converted ] = L'\0';
+
+		TexMetadata metadata{};
+		ScratchImage image{};
+
+		HRESULT result = LoadFromWICFile(
+			wideTexturePath,
+			WIC_FLAGS_NONE,
+			&metadata,
+			image
+		);
+
+		if ( FAILED( result ) )
+		{
+			DebugPrint(
+				"[ModelRenderer] Load texture failed: 0x%08X, %s\n",
+				static_cast<unsigned int>( result ),
+				resolvedTexturePath
+			);
+
+			continue;
+		}
+
+		result = CreateShaderResourceView(
+			device,
+			image.GetImages(),
+			image.GetImageCount(),
+			metadata,
+			&model->SubsetArray[ subsetIndex ]
+				.Material.Texture
+		);
+
+		if ( FAILED( result ) )
+		{
+			DebugPrint(
+				"[ModelRenderer] Create texture SRV failed: 0x%08X, %s\n",
+				static_cast<unsigned int>( result ),
+				resolvedTexturePath
+			);
+
+			continue;
+		}
+
+		model->SubsetArray[ subsetIndex ]
+			.Material.Material.TextureEnable = TRUE;
+	}
+
+	delete[] modelObj.VertexArray;
+	delete[] modelObj.IndexArray;
+	delete[] modelObj.SubsetArray;
+
+	return true;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-// モデル読込 ///////////////////////////////////////////////////////////
-void ModelRenderer::LoadObj(const char* FileName, MODEL_OBJ* ModelObj)
+bool ModelRenderer::LoadObj(
+	const char* fileName,
+	MODEL_OBJ* modelObj
+)
 {
-    // Initialize outputs for safe early returns
-    ModelObj->VertexArray = nullptr;
-    ModelObj->VertexNum = 0;
-    ModelObj->IndexArray = nullptr;
-    ModelObj->IndexNum = 0;
-    ModelObj->SubsetArray = nullptr;
-    ModelObj->SubsetNum = 0;
+	if ( fileName == nullptr || modelObj == nullptr )
+	{
+		return false;
+	}
 
-    char resolvedObjPath[MAX_PATH];
-    const char* objPath = FileName;
-    if (ResolveFilePath(FileName, resolvedObjPath, _countof(resolvedObjPath)))
-    {
-        objPath = resolvedObjPath;
-    }
+	*modelObj = {};
 
-    char dir[MAX_PATH];
-    strcpy(dir, objPath);
-    PathRemoveFileSpec(dir);
+	char resolvedObjPath[ MAX_PATH ]{};
+	const char* objPath = fileName;
 
-    XMFLOAT3* positionArray;
-    XMFLOAT3* normalArray;
-    XMFLOAT2* texcoordArray;
+	if ( ResolveFilePath(
+		fileName,
+		resolvedObjPath,
+		_countof( resolvedObjPath )
+		) )
+	{
+		objPath = resolvedObjPath;
+	}
 
-    unsigned int    positionNum = 0;
-    unsigned int    normalNum = 0;
-    unsigned int    texcoordNum = 0;
-    unsigned int    vertexNum = 0;
-    unsigned int    indexNum = 0;
-    unsigned int    in = 0;
-    unsigned int    subsetNum = 0;
+	FILE* file = nullptr;
 
-    MODEL_MATERIAL* materialArray = nullptr;
-    unsigned int    materialNum = 0;
+	if ( fopen_s( &file, objPath, "rt" ) != 0 ||
+		file == nullptr )
+	{
+		DebugPrint(
+			"[ModelRenderer] Failed to open OBJ: %s\n",
+			objPath
+		);
 
-    char str[256];
-    char* s;
-    char c;
+		return false;
+	}
 
-    FILE* file;
-    file = nullptr;
-    if (fopen_s(&file, objPath, "rt") != 0 || file == nullptr)
-    {
-        char buf[1024];
-        char cwd[MAX_PATH];
-        cwd[0] = '\0';
-        GetCurrentDirectoryA(MAX_PATH, cwd);
-        sprintf_s(buf, "[ModelRenderer] Failed to open OBJ: %s (cwd=%s)\n", objPath ? objPath : "(null)", cwd);
-        OutputDebugStringA(buf);
-        return;
-    }
+	char directoryPath[ MAX_PATH ]{};
+	strcpy_s( directoryPath, objPath );
+	PathRemoveFileSpecA( directoryPath );
 
-    // 要素数カウント
-    while (true)
-    {
-        fscanf(file, "%s", str);
+	unsigned int positionCount = 0;
+	unsigned int normalCount = 0;
+	unsigned int texcoordCount = 0;
+	unsigned int vertexCount = 0;
+	unsigned int indexCount = 0;
+	unsigned int subsetCount = 0;
 
-        if (feof(file) != 0)
-            break;
+	char line[ 4096 ]{};
 
-        if (strcmp(str, "v") == 0)
-        {
-            positionNum++;
-        }
-        else if (strcmp(str, "vn") == 0)
-        {
-            normalNum++;
-        }
-        else if (strcmp(str, "vt") == 0)
-        {
-            texcoordNum++;
-        }
-        else if (strcmp(str, "usemtl") == 0)
-        {
-            subsetNum++;
-        }
-        else if (strcmp(str, "f") == 0)
-        {
-            // Read rest of face line, count corner tokens
-            char lineBuf[1024];
-            if (fgets(lineBuf, sizeof(lineBuf), file))
-            {
-                int corners = 0;
-                char* ctx = nullptr;
-                char* tok = strtok_s(lineBuf, " \t\r\n", &ctx);
-                while (tok && tok[0] != '\0')
-                {
-                    corners++;
-                    vertexNum++;
-                    tok = strtok_s(nullptr, " \t\r\n", &ctx);
-                }
-                if (corners >= 3)
-                {
-                    // fan-triangulate: (corners-2) triangles
-                    indexNum += (corners - 2) * 3;
-                    in += (corners - 2) * 3;
-                }
-            }
-        }
-    }
+	// 1回目: 必要な配列サイズを数える
+	while ( fgets( line, sizeof( line ), file ) != nullptr )
+	{
+		if ( strncmp( line, "v ", 2 ) == 0 )
+		{
+			++positionCount;
+		}
+		else if ( strncmp( line, "vn ", 3 ) == 0 )
+		{
+			++normalCount;
+		}
+		else if ( strncmp( line, "vt ", 3 ) == 0 )
+		{
+			++texcoordCount;
+		}
+		else if ( strncmp( line, "usemtl ", 7 ) == 0 )
+		{
+			++subsetCount;
+		}
+		else if ( strncmp( line, "f ", 2 ) == 0 )
+		{
+			int cornerCount = 0;
 
-    // Some OBJ files have no "usemtl". Ensure at least one subset so we can draw.
-    if (subsetNum == 0)
-    {
-        subsetNum = 1;
-    }
+			char* context = nullptr;
+			char* token = strtok_s(
+				line + 2,
+				" \t\r\n",
+				&context
+			);
 
-    // メモリ確保
-    positionArray = new XMFLOAT3[positionNum];
-    normalArray = new XMFLOAT3[normalNum];
-    texcoordArray = new XMFLOAT2[texcoordNum];
+			while ( token != nullptr )
+			{
+				++cornerCount;
 
-    ModelObj->VertexArray = new VERTEX_3D[vertexNum];
-    ModelObj->VertexNum = vertexNum;
+				token = strtok_s(
+					nullptr,
+					" \t\r\n",
+					&context
+				);
+			}
 
-    ModelObj->IndexArray = new unsigned int[indexNum];
-    ModelObj->IndexNum = indexNum;
+			if ( cornerCount >= 3 )
+			{
+				vertexCount +=
+					static_cast<unsigned int>( cornerCount );
 
-    ModelObj->SubsetArray = new SUBSET[subsetNum];
-    ModelObj->SubsetNum = subsetNum;
+				indexCount +=
+					static_cast<unsigned int>(
+						( cornerCount - 2 ) * 3
+					);
+			}
+		}
+	}
 
-    // ファイルポインタを先頭に戻す
+	if ( subsetCount == 0 )
+	{
+		subsetCount = 1;
+	}
 
+	if ( positionCount == 0 ||
+		vertexCount == 0 ||
+		indexCount == 0 )
+	{
+		DebugPrint(
+			"[ModelRenderer] OBJ has no drawable faces: %s "
+			"(positions=%u, vertices=%u, indices=%u)\n",
+			objPath,
+			positionCount,
+			vertexCount,
+			indexCount
+		);
 
+		fclose( file );
+		return false;
+	}
 
+	XMFLOAT3* positions =
+		new XMFLOAT3[ positionCount ]{};
 
+	XMFLOAT3* normals =
+		normalCount > 0
+		? new XMFLOAT3[ normalCount ]{}
+	: nullptr;
 
+	XMFLOAT2* texcoords =
+		texcoordCount > 0
+		? new XMFLOAT2[ texcoordCount ]{}
+	: nullptr;
 
+	modelObj->VertexArray =
+		new VERTEX_3D[ vertexCount ]{};
 
+	modelObj->VertexNum = vertexCount;
 
+	modelObj->IndexArray =
+		new unsigned int[ indexCount ] {};
 
+	modelObj->IndexNum = indexCount;
 
+	modelObj->SubsetArray =
+		new SUBSET[ subsetCount ]{};
 
+	modelObj->SubsetNum = subsetCount;
 
+	fseek( file, 0, SEEK_SET );
 
+	unsigned int positionIndex = 0;
+	unsigned int normalIndex = 0;
+	unsigned int texcoordIndex = 0;
 
+	unsigned int vertexIndex = 0;
+	unsigned int indexIndex = 0;
+	unsigned int subsetIndex = 0;
 
+	bool hasActiveSubset = false;
 
+	MODEL_MATERIAL* materialArray = nullptr;
+	unsigned int materialNum = 0;
 
-    XMFLOAT3* position = positionArray;
-    XMFLOAT3* normal = normalArray;
-    XMFLOAT2* texcoord = texcoordArray;
+	while ( fgets( line, sizeof( line ), file ) != nullptr )
+	{
+		if ( strncmp( line, "mtllib ", 7 ) == 0 )
+		{
+			char materialFileName[ MAX_PATH ]{};
 
-    unsigned int vc = 0;
-    unsigned int ic = 0;
-    unsigned int sc = 0;
-    bool hasActiveSubset = false;
+			if ( sscanf_s(
+				line + 7,
+				"%259s",
+				materialFileName,
+				static_cast<unsigned>(
+				_countof( materialFileName )
+				)
+				) == 1 )
+			{
+				char materialPath[ MAX_PATH ]{};
 
-    fseek(file, 0, SEEK_SET);
+				if ( PathCombineA(
+					materialPath,
+					directoryPath,
+					materialFileName
+					) != nullptr )
+				{
+					delete[] materialArray;
+					materialArray = nullptr;
+					materialNum = 0;
 
-    while (true)
-    {
-        fscanf(file, "%s", str);
+					LoadMaterial(
+						materialPath,
+						&materialArray,
+						&materialNum
+					);
+				}
+			}
+		}
+		else if ( strncmp( line, "v ", 2 ) == 0 )
+		{
+			if ( positionIndex < positionCount )
+			{
+				sscanf_s(
+					line + 2,
+					"%f %f %f",
+					&positions[ positionIndex ].x,
+					&positions[ positionIndex ].y,
+					&positions[ positionIndex ].z
+				);
 
-        if (feof(file) != 0)
-            break;
+				++positionIndex;
+			}
+		}
+		else if ( strncmp( line, "vn ", 3 ) == 0 )
+		{
+			if ( normals != nullptr &&
+				normalIndex < normalCount )
+			{
+				sscanf_s(
+					line + 3,
+					"%f %f %f",
+					&normals[ normalIndex ].x,
+					&normals[ normalIndex ].y,
+					&normals[ normalIndex ].z
+				);
 
-        if (strcmp(str, "mtllib") == 0)
-        {
-            //マテリアルファイル
-            fscanf(file, "%s", str);
+				++normalIndex;
+			}
+		}
+		else if ( strncmp( line, "vt ", 3 ) == 0 )
+		{
+			if ( texcoords != nullptr &&
+				texcoordIndex < texcoordCount )
+			{
+				sscanf_s(
+					line + 3,
+					"%f %f",
+					&texcoords[ texcoordIndex ].x,
+					&texcoords[ texcoordIndex ].y
+				);
 
-            char path[MAX_PATH];
-            if (PathCombineA(path, dir, str) == nullptr)
-            {
-                // Path too long or invalid; skip loading materials safely
-                continue;
-            }
+				texcoords[ texcoordIndex ].y =
+					1.0f - texcoords[ texcoordIndex ].y;
 
-            LoadMaterial(path, &materialArray, &materialNum);
-            if (materialNum == 0)
-            {
-                char fallbackMtl[MAX_PATH];
-                if (PathCombineA(fallbackMtl, dir, "player.mtl") != nullptr)
-                {
-                    LoadMaterial(fallbackMtl, &materialArray, &materialNum);
-                }
-            }
-        }
-        else if (strcmp(str, "o") == 0)
-        {
-            //オブジェクト名
-            fscanf(file, "%s", str);
-        }
-        else if (strcmp(str, "v") == 0)
-        {
-            //頂点座標
-            fscanf(file, "%f", &position->x);
-            fscanf(file, "%f", &position->y);
-            fscanf(file, "%f", &position->z);
-            position++;
-        }
-        else if (strcmp(str, "vn") == 0)
-        {
-            //法線
-            fscanf(file, "%f", &normal->x);
-            fscanf(file, "%f", &normal->y);
-            fscanf(file, "%f", &normal->z);
-            normal++;
-        }
-        else if (strcmp(str, "vt") == 0)
-        {
-            //テクスチャ座標
-            fscanf(file, "%f", &texcoord->x);
-            fscanf(file, "%f", &texcoord->y);
-            // OBJ (bottom-left origin) -> DirectX texture space (top-left V)
-            texcoord->y = 1.0f - texcoord->y;
-            texcoord++;
-        }
-        else if (strcmp(str, "usemtl") == 0)
-        {
-            //マテリアル
-            fscanf(file, "%s", str);
+				++texcoordIndex;
+			}
+		}
+		else if ( strncmp( line, "usemtl ", 7 ) == 0 )
+		{
+			if ( subsetIndex >= modelObj->SubsetNum )
+			{
+				continue;
+			}
 
-            // Safety: subsetNum may be wrong for malformed OBJ; avoid overflow/null access
-            if (sc >= ModelObj->SubsetNum || ModelObj->SubsetArray == nullptr)
-            {
-                // Skip defining subset to avoid crashing
-                continue;
-            }
+			if ( hasActiveSubset )
+			{
+				SUBSET& previousSubset =
+					modelObj->SubsetArray[
+						subsetIndex - 1
+					];
 
-            if (sc != 0)
-            {
-                ModelObj->SubsetArray[sc - 1].IndexNum = ic - ModelObj->SubsetArray[sc - 1].StartIndex;
-            }
+				previousSubset.IndexNum =
+					indexIndex -
+					previousSubset.StartIndex;
+			}
 
-            ModelObj->SubsetArray[sc].StartIndex = ic;
-            hasActiveSubset = true;
+			char materialName[ 256 ]{};
 
-            ModelObj->SubsetArray[sc].Material.Material.Ambient = XMFLOAT4(0.2f, 0.2f, 0.2f, 1.0f);
-            ModelObj->SubsetArray[sc].Material.Material.Diffuse = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
-            ModelObj->SubsetArray[sc].Material.Material.Specular = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
-            ModelObj->SubsetArray[sc].Material.Material.Emission = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
-            ModelObj->SubsetArray[sc].Material.Material.Shininess = 0.0f;
-            ModelObj->SubsetArray[sc].Material.Material.TextureEnable = FALSE;
-            strcpy(ModelObj->SubsetArray[sc].Material.TextureName, "");
-            strcpy(ModelObj->SubsetArray[sc].Material.Name, str);
+			sscanf_s(
+				line + 7,
+				"%255s",
+				materialName,
+				static_cast<unsigned>(
+				_countof( materialName )
+			)
+			);
 
-            for (unsigned int i = 0; i < materialNum; i++)
-            {
-                if (strcmp(str, materialArray[i].Name) == 0)
-                {
-                    ModelObj->SubsetArray[sc].Material.Material = materialArray[i].Material;
-                    strcpy(ModelObj->SubsetArray[sc].Material.TextureName, materialArray[i].TextureName);
-                    strcpy(ModelObj->SubsetArray[sc].Material.Name, materialArray[i].Name);
+			SUBSET& subset =
+				modelObj->SubsetArray[ subsetIndex ];
 
-                    break;
-                }
-            }
+			subset.StartIndex = indexIndex;
+			subset.IndexNum = 0;
 
-            sc++;
-        }
-        else if (strcmp(str, "f") == 0)
-        {
-            //面 — read whole line then fan-triangulate (supports tri, quad, n-gon)
+			AssignMaterialByName(
+				subset.Material,
+				materialName,
+				materialArray,
+				materialNum
+			);
 
-            if (!hasActiveSubset && ModelObj->SubsetArray != nullptr && ModelObj->SubsetNum > 0)
-            {
-                ModelObj->SubsetArray[0].StartIndex = 0;
-                ModelObj->SubsetArray[0].IndexNum = 0;
-                ModelObj->SubsetArray[0].Material.Material.Diffuse = { 1.0f,1.0f,1.0f,1.0f };
-                ModelObj->SubsetArray[0].Material.Material.Ambient = { 0.2f,0.2f,0.2f,1.0f };
-                ModelObj->SubsetArray[0].Material.Material.Emission = { 0.0f,0.0f,0.0f,0.0f };
-                ModelObj->SubsetArray[0].Material.Material.TextureEnable = FALSE;
-                strcpy(ModelObj->SubsetArray[0].Material.TextureName, "");
-                strcpy(ModelObj->SubsetArray[0].Material.Name, "default");
-                hasActiveSubset = true;
-                sc = 1;
-            }
+			hasActiveSubset = true;
+			++subsetIndex;
+		}
+		else if ( strncmp( line, "f ", 2 ) == 0 )
+		{
+			if ( !hasActiveSubset )
+			{
+				SUBSET& subset =
+					modelObj->SubsetArray[ 0 ];
 
-            char lineBuf[1024];
-            if (!fgets(lineBuf, sizeof(lineBuf), file))
-            {
-                continue;
-            }
+				subset.StartIndex = indexIndex;
+				subset.IndexNum = 0;
 
-            // collect corner specs from the line
-            static const int MAX_CORNERS = 32;
-            int cornerV[MAX_CORNERS], cornerVt[MAX_CORNERS], cornerVn[MAX_CORNERS];
-            int corners = 0;
+				InitializeDefaultMaterial(
+					subset.Material
+				);
 
-            char* ctx2 = nullptr;
-            char* tok = strtok_s(lineBuf, " \t\r\n", &ctx2);
-            while (tok && tok[0] != '\0' && corners < MAX_CORNERS)
-            {
-                int vIdx = -1, vtIdx = -1, vnIdx = -1;
-                const char* p = tok;
-                char* endp = nullptr;
-                vIdx = (int)strtol(p, &endp, 10);
-                p = endp;
-                if (p && *p == '/')
-                {
-                    p++;
-                    if (*p != '/')
-                    {
-                        vtIdx = (int)strtol(p, &endp, 10);
-                        p = endp;
-                    }
-                    if (p && *p == '/')
-                    {
-                        p++;
-                        vnIdx = (int)strtol(p, nullptr, 10);
-                    }
-                }
-                cornerV[corners] = vIdx;
-                cornerVt[corners] = vtIdx;
-                cornerVn[corners] = vnIdx;
-                corners++;
-                tok = strtok_s(nullptr, " \t\r\n", &ctx2);
-            }
+				hasActiveSubset = true;
+				subsetIndex = 1;
+			}
 
-            if (corners < 3) continue;
+			int positionIndices[ kMaxFaceCorners ]{};
+			int texcoordIndices[ kMaxFaceCorners ]{};
+			int normalIndices[ kMaxFaceCorners ]{};
 
-            // Write all corner vertices first
-            unsigned int baseVc = vc;
-            for (int ci = 0; ci < corners; ci++)
-            {
-                int vIdx = cornerV[ci];
-                int vtIdx = cornerVt[ci];
-                int vnIdx = cornerVn[ci];
+			int cornerCount = 0;
 
-                if (vIdx <= 0 || (unsigned int)vIdx > positionNum || vc >= vertexNum)
-                {
-                    vc++;
-                    continue;
-                }
-                ModelObj->VertexArray[vc].Position = positionArray[vIdx - 1];
-                if (vtIdx > 0 && (unsigned int)vtIdx <= texcoordNum)
-                    ModelObj->VertexArray[vc].TexCoord = texcoordArray[vtIdx - 1];
-                else
-                    ModelObj->VertexArray[vc].TexCoord = XMFLOAT2(0.0f, 0.0f);
-                if (vnIdx > 0 && (unsigned int)vnIdx <= normalNum)
-                    ModelObj->VertexArray[vc].Normal = normalArray[vnIdx - 1];
-                else
-                    ModelObj->VertexArray[vc].Normal = XMFLOAT3(0.0f, 1.0f, 0.0f);
-                ModelObj->VertexArray[vc].Diffuse = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
-                vc++;
-            }
+			char* context = nullptr;
+			char* token = strtok_s(
+				line + 2,
+				" \t\r\n",
+				&context
+			);
 
-            // Fan triangulation: (0,1,2), (0,2,3), (0,3,4) ...
-            for (int ci = 1; ci < corners - 1; ci++)
-            {
-                if (ic + 2 >= indexNum) break;
-                ModelObj->IndexArray[ic++] = baseVc;
-                ModelObj->IndexArray[ic++] = baseVc + ci;
-                ModelObj->IndexArray[ic++] = baseVc + ci + 1;
-            }
-        }
-    }
+			while ( token != nullptr &&
+				   cornerCount < kMaxFaceCorners )
+			{
+				if ( ParseObjIndex(
+					token,
+					positionIndices[ cornerCount ],
+					texcoordIndices[ cornerCount ],
+					normalIndices[ cornerCount ]
+					) )
+				{
+					++cornerCount;
+				}
 
+				token = strtok_s(
+					nullptr,
+					" \t\r\n",
+					&context
+				);
+			}
 
-    // finalize last subset
-    if (ModelObj->SubsetArray != nullptr && ModelObj->SubsetNum > 0)
-    {
-        if (sc != 0)
-        {
-            ModelObj->SubsetArray[sc - 1].IndexNum = ic - ModelObj->SubsetArray[sc - 1].StartIndex;
-        }
-        else
-        {
-            // no usemtl and no faces (or malformed), keep a safe default
-            ModelObj->SubsetArray[0].StartIndex = 0;
-            ModelObj->SubsetArray[0].IndexNum = ic;
-        }
-    }
+			if ( cornerCount < 3 )
+			{
+				continue;
+			}
 
-        fclose(file);
+			const unsigned int faceStartVertex =
+				vertexIndex;
 
-        delete[] positionArray;
-        delete[] normalArray;
-        delete[] texcoordArray;
-        delete[] materialArray;
-    
+			for ( int corner = 0;
+				 corner < cornerCount;
+				 ++corner )
+			{
+				if ( vertexIndex >= modelObj->VertexNum )
+				{
+					break;
+				}
+
+				VERTEX_3D& vertex =
+					modelObj->VertexArray[ vertexIndex ];
+
+				const int positionArrayIndex =
+					ConvertObjIndex(
+						positionIndices[ corner ],
+						positionCount
+					);
+
+				const int texcoordArrayIndex =
+					ConvertObjIndex(
+						texcoordIndices[ corner ],
+						texcoordCount
+					);
+
+				const int normalArrayIndex =
+					ConvertObjIndex(
+						normalIndices[ corner ],
+						normalCount
+					);
+
+				if ( positionArrayIndex >= 0 )
+				{
+					vertex.Position =
+						positions[ positionArrayIndex ];
+				}
+
+				if ( texcoords != nullptr &&
+					texcoordArrayIndex >= 0 )
+				{
+					vertex.TexCoord =
+						texcoords[ texcoordArrayIndex ];
+				}
+				else
+				{
+					vertex.TexCoord =
+						XMFLOAT2( 0.0f, 0.0f );
+				}
+
+				if ( normals != nullptr &&
+					normalArrayIndex >= 0 )
+				{
+					vertex.Normal =
+						normals[ normalArrayIndex ];
+				}
+				else
+				{
+					vertex.Normal =
+						XMFLOAT3( 0.0f, 1.0f, 0.0f );
+				}
+
+				vertex.Diffuse =
+					XMFLOAT4(
+						1.0f,
+						1.0f,
+						1.0f,
+						1.0f
+					);
+
+				++vertexIndex;
+			}
+
+			// N角形を扇形分割して三角形リストにする
+			for ( int corner = 1;
+				 corner < cornerCount - 1;
+				 ++corner )
+			{
+				if ( indexIndex + 2 >=
+					modelObj->IndexNum )
+				{
+					break;
+				}
+
+				modelObj->IndexArray[ indexIndex++ ] =
+					faceStartVertex;
+
+				modelObj->IndexArray[ indexIndex++ ] =
+					faceStartVertex + corner;
+
+				modelObj->IndexArray[ indexIndex++ ] =
+					faceStartVertex + corner + 1;
+			}
+		}
+	}
+
+	fclose( file );
+
+	if ( hasActiveSubset && subsetIndex > 0 )
+	{
+		SUBSET& lastSubset =
+			modelObj->SubsetArray[ subsetIndex - 1 ];
+
+		lastSubset.IndexNum =
+			indexIndex - lastSubset.StartIndex;
+	}
+
+	delete[] positions;
+	delete[] normals;
+	delete[] texcoords;
+	delete[] materialArray;
+
+	if ( vertexIndex == 0 || indexIndex == 0 )
+	{
+		delete[] modelObj->VertexArray;
+		delete[] modelObj->IndexArray;
+		delete[] modelObj->SubsetArray;
+
+		*modelObj = {};
+
+		DebugPrint(
+			"[ModelRenderer] OBJ parse produced no render data: %s\n",
+			objPath
+		);
+
+		return false;
+	}
+
+	return true;
 }
-//マテリアル読み込み
-void ModelRenderer::LoadMaterial(const char* FileName, MODEL_MATERIAL * *MaterialArray, unsigned int* MaterialNum)
+
+bool ModelRenderer::LoadMaterial(
+	const char* fileName,
+	MODEL_MATERIAL** materialArray,
+	unsigned int* materialNum
+)
 {
-    if (MaterialArray) *MaterialArray = nullptr;
-    if (MaterialNum) *MaterialNum = 0;
+	if ( materialArray == nullptr ||
+		materialNum == nullptr )
+	{
+		return false;
+	}
 
-    char resolvedMtlPath[MAX_PATH];
-    const char* mtlPath = FileName;
-    if (ResolveFilePath(FileName, resolvedMtlPath, _countof(resolvedMtlPath)))
-    {
-        mtlPath = resolvedMtlPath;
-    }
+	*materialArray = nullptr;
+	*materialNum = 0;
 
-    char dir[MAX_PATH];
-    strcpy(dir, mtlPath);
-    PathRemoveFileSpec(dir);
+	if ( fileName == nullptr )
+	{
+		return false;
+	}
 
+	char resolvedMtlPath[ MAX_PATH ]{};
+	const char* materialPath = fileName;
 
+	if ( ResolveFilePath(
+		fileName,
+		resolvedMtlPath,
+		_countof( resolvedMtlPath )
+		) )
+	{
+		materialPath = resolvedMtlPath;
+	}
 
+	FILE* file = nullptr;
 
+	if ( fopen_s( &file, materialPath, "rt" ) != 0 ||
+		file == nullptr )
+	{
+		DebugPrint(
+			"[ModelRenderer] Failed to open MTL: %s\n",
+			materialPath
+		);
 
+		return false;
+	}
 
-    char str[256];
+	char materialDirectory[ MAX_PATH ]{};
+	strcpy_s( materialDirectory, materialPath );
+	PathRemoveFileSpecA( materialDirectory );
 
-    FILE* file;
-    file = nullptr;
-    if (fopen_s(&file, mtlPath, "rt") != 0 || file == nullptr)
-    {
-        char buf[1024];
-        char cwd[MAX_PATH];
-        cwd[0] = '\0';
-        GetCurrentDirectoryA(MAX_PATH, cwd);
-        sprintf_s(buf, "[ModelRenderer] Failed to open MTL: %s (cwd=%s)\n", mtlPath ? mtlPath : "(null)", cwd);
-        OutputDebugStringA(buf);
-        return;
-    }
+	unsigned int count = 0;
+	char line[ 4096 ]{};
 
-    MODEL_MATERIAL* materialArray;
-    unsigned int materialNum = 0;
+	// 1回目: newmtl の数を数える
+	while ( fgets( line, sizeof( line ), file ) != nullptr )
+	{
+		if ( strncmp( line, "newmtl ", 7 ) == 0 )
+		{
+			++count;
+		}
+	}
 
-    //要素数カウント
-    while (true)
-    {
-        fscanf(file, "%s", str);
+	if ( count == 0 )
+	{
+		fclose( file );
+		return false;
+	}
 
-        if (feof(file) != 0)
-            break;
+	MODEL_MATERIAL* materials =
+		new MODEL_MATERIAL[ count ]{};
 
-        if (strcmp(str, "newmtl") == 0)
-        {
-            materialNum++;
-        }
-    }
+	fseek( file, 0, SEEK_SET );
 
-    //メモリ確保
-    materialArray = new MODEL_MATERIAL[materialNum];
+	int currentMaterial = -1;
 
-    //要素読込
-    int mc = -1;
+	while ( fgets( line, sizeof( line ), file ) != nullptr )
+	{
+		if ( strncmp( line, "newmtl ", 7 ) == 0 )
+		{
+			++currentMaterial;
 
-    fseek(file, 0, SEEK_SET);
+			if ( currentMaterial >=
+				static_cast<int>( count ) )
+			{
+				break;
+			}
 
-    while (true)
-    {
-        fscanf(file, "%s", str);
+			InitializeDefaultMaterial(
+				materials[ currentMaterial ]
+			);
 
-        if (feof(file) != 0)
-            break;
+			sscanf_s(
+				line + 7,
+				"%255s",
+				materials[ currentMaterial ].Name,
+				static_cast<unsigned>(
+				_countof(
+				materials[ currentMaterial ].Name
+			)
+			)
+			);
+		}
+		else if ( currentMaterial < 0 )
+		{
+			continue;
+		}
+		else if ( strncmp( line, "Ka ", 3 ) == 0 )
+		{
+			sscanf_s(
+				line + 3,
+				"%f %f %f",
+				&materials[ currentMaterial ]
+					.Material.Ambient.x,
+				&materials[ currentMaterial ]
+					.Material.Ambient.y,
+				&materials[ currentMaterial ]
+					.Material.Ambient.z
+			);
 
-        if (strcmp(str, "newmtl") == 0)
-        {
-            //マテリアル名
-            mc++;
-            fscanf(file, "%s", materialArray[mc].Name);
-            strcpy(materialArray[mc].TextureName, "");
-            materialArray[mc].Material.Ambient = XMFLOAT4(0.2f, 0.2f, 0.2f, 1.0f);
-            materialArray[mc].Material.Diffuse = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
-            materialArray[mc].Material.Specular = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
-            materialArray[mc].Material.Emission = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
-            materialArray[mc].Material.Shininess = 0.0f;
-            materialArray[mc].Material.TextureEnable = FALSE;
-            materialArray[mc].Texture = nullptr;
-        }
-        else if (strcmp(str, "Ka") == 0)
-        {
-            //アンビエント
-            fscanf(file, "%f", &materialArray[mc].Material.Ambient.x);
-            fscanf(file, "%f", &materialArray[mc].Material.Ambient.y);
-            fscanf(file, "%f", &materialArray[mc].Material.Ambient.z);
-            materialArray[mc].Material.Ambient.w = 1.0f;
-        }
-        else if (strcmp(str, "Kd") == 0)
-        {
-            //ディフューズ
-            fscanf(file, "%f", &materialArray[mc].Material.Diffuse.x);
-            fscanf(file, "%f", &materialArray[mc].Material.Diffuse.y);
-            fscanf(file, "%f", &materialArray[mc].Material.Diffuse.z);
-            materialArray[mc].Material.Diffuse.w = 1.0f;
-        }
-        else if (strcmp(str, "Ks") == 0)
-        {
-            //スペキュラ
-            fscanf(file, "%f", &materialArray[mc].Material.Specular.x);
-            fscanf(file, "%f", &materialArray[mc].Material.Specular.y);
-            fscanf(file, "%f", &materialArray[mc].Material.Specular.z);
-            materialArray[mc].Material.Specular.w = 1.0f;
-        }
-        else if (strcmp(str, "Ns") == 0)
-        {
-            fscanf(file, "%f", &materialArray[mc].Material.Shininess);
-        }
-        else if (strcmp(str, "d") == 0)
-        {
-            fscanf(file, "%f", &materialArray[mc].Material.Diffuse.w);
-        }
-        else if (strcmp(str, "Tr") == 0)
-        {
-            // MTL Tr is inverse alpha
-            fscanf(file, "%f", &materialArray[mc].Material.Diffuse.w);
-            materialArray[mc].Material.Diffuse.w = 1.0f - materialArray[mc].Material.Diffuse.w;
-        }
-        else if (strcmp(str, "map_Kd") == 0)
-        {
-            char texFile[MAX_PATH];
-            fscanf(file, "%s", texFile);
-            if (PathIsRelativeA(texFile))
-            {
-                char fullPath[MAX_PATH];
-                if (PathCombineA(fullPath, dir, texFile) != nullptr)
-                {
-                    strcpy(materialArray[mc].TextureName, fullPath);
-                }
-                else
-                {
-                    strcpy(materialArray[mc].TextureName, texFile);
-                }
-            }
-            else
-            {
-                strcpy(materialArray[mc].TextureName, texFile);
-            }
-        }
-    }
+			materials[ currentMaterial ]
+				.Material.Ambient.w = 1.0f;
+		}
+		else if ( strncmp( line, "Kd ", 3 ) == 0 )
+		{
+			sscanf_s(
+				line + 3,
+				"%f %f %f",
+				&materials[ currentMaterial ]
+					.Material.Diffuse.x,
+				&materials[ currentMaterial ]
+					.Material.Diffuse.y,
+				&materials[ currentMaterial ]
+					.Material.Diffuse.z
+			);
 
-    fclose(file);
-    if (MaterialArray) *MaterialArray = materialArray;
-    if (MaterialNum) *MaterialNum = materialNum;
+			materials[ currentMaterial ]
+				.Material.Diffuse.w = 1.0f;
+		}
+		else if ( strncmp( line, "Ks ", 3 ) == 0 )
+		{
+			sscanf_s(
+				line + 3,
+				"%f %f %f",
+				&materials[ currentMaterial ]
+					.Material.Specular.x,
+				&materials[ currentMaterial ]
+					.Material.Specular.y,
+				&materials[ currentMaterial ]
+					.Material.Specular.z
+			);
+
+			materials[ currentMaterial ]
+				.Material.Specular.w = 1.0f;
+		}
+		else if ( strncmp( line, "Ns ", 3 ) == 0 )
+		{
+			sscanf_s(
+				line + 3,
+				"%f",
+				&materials[ currentMaterial ]
+					.Material.Shininess
+			);
+		}
+		else if ( strncmp( line, "d ", 2 ) == 0 )
+		{
+			sscanf_s(
+				line + 2,
+				"%f",
+				&materials[ currentMaterial ]
+					.Material.Diffuse.w
+			);
+		}
+		else if ( strncmp( line, "Tr ", 3 ) == 0 )
+		{
+			float transparency = 0.0f;
+
+			sscanf_s(
+				line + 3,
+				"%f",
+				&transparency
+			);
+
+			materials[ currentMaterial ]
+				.Material.Diffuse.w =
+				1.0f - transparency;
+		}
+		else if ( strncmp( line, "map_Kd ", 7 ) == 0 )
+		{
+			char textureFileName[ MAX_PATH ]{};
+
+			if ( sscanf_s(
+				line + 7,
+				"%259s",
+				textureFileName,
+				static_cast<unsigned>(
+				_countof( textureFileName )
+				)
+				) == 1 )
+			{
+				if ( PathIsRelativeA( textureFileName ) )
+				{
+					char texturePath[ MAX_PATH ]{};
+
+					if ( PathCombineA(
+						texturePath,
+						materialDirectory,
+						textureFileName
+						) != nullptr )
+					{
+						strcpy_s(
+							materials[ currentMaterial ]
+								.TextureName,
+							texturePath
+						);
+					}
+				}
+				else
+				{
+					strcpy_s(
+						materials[ currentMaterial ]
+							.TextureName,
+						textureFileName
+					);
+				}
+			}
+		}
+	}
+
+	fclose( file );
+
+	*materialArray = materials;
+	*materialNum = count;
+
+	return true;
 }
-      
+
+void ModelRenderer::ReleaseModel( MODEL* model )
+{
+	if ( model == nullptr )
+	{
+		return;
+	}
+
+	if ( model->VertexBuffer != nullptr )
+	{
+		model->VertexBuffer->Release();
+		model->VertexBuffer = nullptr;
+	}
+
+	if ( model->IndexBuffer != nullptr )
+	{
+		model->IndexBuffer->Release();
+		model->IndexBuffer = nullptr;
+	}
+
+	if ( model->SubsetArray != nullptr )
+	{
+		for ( unsigned int subsetIndex = 0;
+			 subsetIndex < model->SubsetNum;
+			 ++subsetIndex )
+		{
+			ID3D11ShaderResourceView* texture =
+				model->SubsetArray[ subsetIndex ]
+				.Material.Texture;
+
+			if ( texture != nullptr )
+			{
+				texture->Release();
+
+				model->SubsetArray[ subsetIndex ]
+					.Material.Texture = nullptr;
+			}
+		}
+
+		delete[] model->SubsetArray;
+		model->SubsetArray = nullptr;
+	}
+
+	model->SubsetNum = 0;
+
+	delete model;
+}

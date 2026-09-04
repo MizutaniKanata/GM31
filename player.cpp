@@ -24,6 +24,8 @@ void Player::Init()
 	m_AnimationModel->Load( "asset\\model\\Akai.fbx" );
 	m_AnimationModel->LoadAnimation( "asset\\model\\Akai_Idle.fbx", "Idle" );
 	m_AnimationModel->LoadAnimation( "asset\\model\\Akai_Run.fbx", "Run" );
+	m_AnimationName = "Idle";
+	m_NextAnimationName = "Idle";
 
 	// シェーダー読込
 	Renderer::CreateVertexShader( &m_VertexShader, &m_VertexLayout, "shader\\unlitTextureVS.cso" );
@@ -107,15 +109,15 @@ void Player::Update()
 	m_Position += m_Velocity * dt;
 
 	// 前の接地判定を保存するためのローカル変数
-	bool oldGround = m_Ground;
-	m_Ground = false;
+	bool isoldGround = m_isGround;
+	m_isGround = false;
 
 	// 地面衝突判定
 	if ( m_Position.y < 0.0f )
 	{
 		m_Position.y = 0.0f;
 		m_Velocity.y = 0.0f;
-		m_Ground = true;
+		m_isGround = true;
 	}
 
 	//// 線形補間でScale.xを戻す
@@ -186,7 +188,7 @@ void Player::Update()
 				// 上面に衝突
 				m_Position.y = boxPosition.y + boxScale.y * 2.0f;
 				m_Velocity.y = 0.0f;
-				m_Ground = true;
+				m_isGround = true;
 			}
 			else if ( boxPosition.y - boxScale.y < m_Position.y &&
 				m_Position.y < boxPosition.y + boxScale.y )
@@ -217,7 +219,7 @@ void Player::Update()
 	}
 
 	// 歩きアニメーション
-	if ( m_Ground )
+	if ( m_isGround )
 	{
 		float animationSpeed = 1.0f;
 		float animationHeight = 0.03;
@@ -229,10 +231,10 @@ void Player::Update()
 	// 隕石ループ生成
 	if ( Input::GetKeyTrigger( 'L' ) )
 	{
-		m_MeteorLoop = !m_MeteorLoop; // 再度押すと新規生成だけ止まる
+		m_isMeteorLoop = !m_isMeteorLoop; // 再度押すと新規生成だけ止まる
 		m_MeteorSpawnTimer = 0.0f;    // 押した瞬間に1個目を出す
 	}
-	if ( m_MeteorLoop )
+	if ( m_isMeteorLoop )
 	{
 		m_MeteorSpawnTimer -= dt;
 		if ( m_MeteorSpawnTimer <= 0.0f )
@@ -248,10 +250,10 @@ void Player::Update()
 	// 花火ループ生成：Oキーでトグル
 	if ( Input::GetKeyTrigger( 'O' ) )
 	{
-		m_FireworkLoop = !m_FireworkLoop;
+		m_isFireworkLoop = !m_isFireworkLoop;
 		m_FireworkSpawnTimer = 0.0f;
 	}
-	if ( m_FireworkLoop )
+	if ( m_isFireworkLoop )
 	{
 		m_FireworkSpawnTimer -= dt;
 		if ( m_FireworkSpawnTimer <= 0.0f )
@@ -265,6 +267,11 @@ void Player::Update()
 	}
 
 	m_AnimationFrame++;
+	m_NextAnimationFrame++;
+
+	m_Blend += 0.01f;
+	if ( m_Blend > 1.0f )
+		m_Blend = 1.0f;
 
 	GameObject::Update();
 }
@@ -293,7 +300,8 @@ void Player::Draw()
 
 	Renderer::SetWorldMatrix( world );
 
-	m_AnimationModel->Update( m_AnimationName.c_str(), m_AnimationFrame );
+	m_AnimationModel->Update( m_AnimationName.c_str(), m_AnimationFrame
+							  , m_NextAnimationName.c_str(), m_NextAnimationFrame, m_Blend );
 
 	GameObject::Draw(); // 継承元のDraw()を呼び出す
 }
@@ -309,9 +317,14 @@ void Player::Uninit()
 
 void Player::SetAnimation( const char* animationName )
 {
-	if ( m_AnimationName != animationName )
+	if ( m_NextAnimationName != animationName )
 	{
-		m_AnimationName = animationName;
-		m_AnimationFrame = 0;
+		m_AnimationName = m_NextAnimationName;
+		m_AnimationFrame = m_NextAnimationFrame;
+
+		m_NextAnimationName = animationName;
+		m_NextAnimationFrame = 0;
+
+		m_Blend = 0.0f;
 	}
 }

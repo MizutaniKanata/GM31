@@ -19,7 +19,7 @@ void Manager::Init()
 	Renderer::Init();
 	Audio::InitMaster();
 
-	SetScene<Title>();
+	SetScene<Game>();
 }
 void Manager::Update()
 {
@@ -37,7 +37,12 @@ void Manager::Update()
 	// ゲームオブジェクト削除、ラムダ式
 	m_GameObjects.remove_if( []( GameObject* object )
 	{
-		return object->Destroy();
+		if ( object != nullptr && object->Destroy() )
+		{
+			object->Uninit();
+			SAFE_DELETE( object );
+			return true;
+		}
 	} );
 
 	//　シーン切り替え
@@ -54,6 +59,7 @@ void Manager::Update()
 
 			for ( GameObject* gameObject : m_GameObjects )
 			{
+				gameObject->Uninit();
 				SAFE_DELETE( gameObject );
 			}
 

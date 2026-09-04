@@ -3,7 +3,7 @@
 #include <thread>
 
 const char* CLASS_NAME = "AppClass";
-const char* WINDOW_NAME = "DX11„Ç≤„Éº„É†";
+const char* WINDOW_NAME = "DX11ÉQÅ[ÉÄ";
 
 LRESULT CALLBACK WndProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam );
 

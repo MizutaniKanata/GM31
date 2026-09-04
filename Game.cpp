@@ -44,7 +44,7 @@ void Game::Init()
 	//	Manager::AddGameObject<Tree>()->SetPosition( postision );
 	//}
 
-	//AddGameObject<Particle>()->SetPosition( { -2.0f,1.0f,-1.0f } );
+	/*AddGameObject<Particle>()->SetPosition( { -2.0f,1.0f,-1.0f } );*/
 
 	//Manager::AddGameObject<Polygon2D>()->Init( 0.0, 0.0, 200.0f, 200.0f, L"asset\\texture\\2dtest.png" );
 	//Manager::AddGameObject<Score>()->SetPosition( { 100.0f,100.0f,0.0f } );

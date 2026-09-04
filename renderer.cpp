@@ -236,20 +236,20 @@ void Renderer::End()
 	m_SwapChain->Present( 1, 0 );
 }
 
-void Renderer::SetDepthEnable( bool Enable )
+void Renderer::SetDepthEnable( bool isEnable )
 {
-	if ( Enable )
+	if ( isEnable )
 		m_DeviceContext->OMSetDepthStencilState( m_DepthStateEnable, NULL );
 	else
 		m_DeviceContext->OMSetDepthStencilState( m_DepthStateDisable, NULL );
 
 }
 
-void Renderer::SetATCEnable( bool Enable )
+void Renderer::SetATCEnable( bool isEnable )
 {
 	float blendFactor[ 4 ] = { 0.0f, 0.0f, 0.0f, 0.0f };
 
-	if ( Enable )
+	if ( isEnable )
 		m_DeviceContext->OMSetBlendState( m_BlendStateATC, blendFactor, 0xffffffff );
 	else
 		m_DeviceContext->OMSetBlendState( m_BlendState, blendFactor, 0xffffffff );
@@ -266,38 +266,60 @@ void Renderer::SetWorldViewProjection2D()
 	SetProjectionMatrix( projection );
 }
 
-void Renderer::SetWorldMatrix( XMMATRIX WorldMatrix )
+void Renderer::SetWorldMatrix( XMMATRIX worldMatrix )
 {
 	XMFLOAT4X4 worldf;
-	XMStoreFloat4x4( &worldf, XMMatrixTranspose( WorldMatrix ) );
+	XMStoreFloat4x4( &worldf, XMMatrixTranspose( worldMatrix ) );
 	m_DeviceContext->UpdateSubresource( m_WorldBuffer, 0, NULL, &worldf, 0, 0 );
 }
 
-void Renderer::SetViewMatrix( XMMATRIX ViewMatrix )
+void Renderer::SetViewMatrix( XMMATRIX viewMatrix )
 {
 	XMFLOAT4X4 viewf;
-	XMStoreFloat4x4( &viewf, XMMatrixTranspose( ViewMatrix ) );
+	XMStoreFloat4x4( &viewf, XMMatrixTranspose( viewMatrix ) );
 	m_DeviceContext->UpdateSubresource( m_ViewBuffer, 0, NULL, &viewf, 0, 0 );
 }
 
-void Renderer::SetProjectionMatrix( XMMATRIX ProjectionMatrix )
+void Renderer::SetProjectionMatrix( XMMATRIX projectionMatrix )
 {
 	XMFLOAT4X4 projectionf;
-	XMStoreFloat4x4( &projectionf, XMMatrixTranspose( ProjectionMatrix ) );
+	XMStoreFloat4x4( &projectionf, XMMatrixTranspose( projectionMatrix ) );
 	m_DeviceContext->UpdateSubresource( m_ProjectionBuffer, 0, NULL, &projectionf, 0, 0 );
 
 }
 
 
 
-void Renderer::SetMaterial( MATERIAL Material )
+void Renderer::SetMaterial( MATERIAL material )
 {
-	m_DeviceContext->UpdateSubresource( m_MaterialBuffer, 0, NULL, &Material, 0, 0 );
+	m_DeviceContext->UpdateSubresource( m_MaterialBuffer, 0, NULL, &material, 0, 0 );
 }
 
-void Renderer::SetLight( LIGHT Light )
+void Renderer::SetLight( LIGHT light )
 {
-	m_DeviceContext->UpdateSubresource( m_LightBuffer, 0, NULL, &Light, 0, 0 );
+	m_DeviceContext->UpdateSubresource( m_LightBuffer, 0, NULL, &light, 0, 0 );
+}
+
+void Renderer::SetCullMode( D3D11_CULL_MODE cullMode )
+{
+	D3D11_RASTERIZER_DESC desc{};
+	desc.FillMode = D3D11_FILL_SOLID;
+	desc.CullMode = cullMode;
+	desc.FrontCounterClockwise = FALSE;
+	desc.DepthClipEnable = TRUE;
+
+	ID3D11RasterizerState* rasterizerState = nullptr;
+
+	HRESULT hr = GetDevice()->CreateRasterizerState(
+		&desc,
+		&rasterizerState
+	);
+
+	if ( SUCCEEDED( hr ) )
+	{
+		GetDeviceContext()->RSSetState( rasterizerState );
+		rasterizerState->Release();
+	}
 }
 
 static FILE* OpenShaderBinary( const char* fileName )
@@ -360,13 +382,13 @@ static FILE* OpenShaderBinary( const char* fileName )
 	return nullptr;
 }
 
-void Renderer::CreateVertexShader( ID3D11VertexShader** VertexShader, ID3D11InputLayout** VertexLayout, const char* FileName )
+void Renderer::CreateVertexShader( ID3D11VertexShader** vertexShader, ID3D11InputLayout** vertexLayout, const char* fileName )
 {
 
 	FILE* file;
 	long int fsize;
 
-	file = OpenShaderBinary( FileName );
+	file = OpenShaderBinary( fileName );
 	assert( file );
 
 	fsize = _filelength( _fileno( file ) );
@@ -374,7 +396,7 @@ void Renderer::CreateVertexShader( ID3D11VertexShader** VertexShader, ID3D11Inpu
 	fread( buffer, fsize, 1, file );
 	fclose( file );
 
-	m_Device->CreateVertexShader( buffer, fsize, NULL, VertexShader );
+	m_Device->CreateVertexShader( buffer, fsize, NULL, vertexShader );
 
 
 	D3D11_INPUT_ELEMENT_DESC layout[] =
@@ -390,17 +412,17 @@ void Renderer::CreateVertexShader( ID3D11VertexShader** VertexShader, ID3D11Inpu
 		numElements,
 		buffer,
 		fsize,
-		VertexLayout );
+		vertexLayout );
 
 	delete[] buffer;
 }
 
-void Renderer::CreatePixelShader( ID3D11PixelShader** PixelShader, const char* FileName )
+void Renderer::CreatePixelShader( ID3D11PixelShader** pixelShader, const char* fileName )
 {
 	FILE* file;
 	long int fsize;
 
-	file = OpenShaderBinary( FileName );
+	file = OpenShaderBinary( fileName );
 	assert( file );
 
 	fsize = _filelength( _fileno( file ) );
@@ -408,7 +430,7 @@ void Renderer::CreatePixelShader( ID3D11PixelShader** PixelShader, const char* F
 	fread( buffer, fsize, 1, file );
 	fclose( file );
 
-	m_Device->CreatePixelShader( buffer, fsize, NULL, PixelShader );
+	m_Device->CreatePixelShader( buffer, fsize, NULL, pixelShader );
 
 	delete[] buffer;
 }

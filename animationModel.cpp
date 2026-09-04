@@ -59,11 +59,11 @@ void AnimationModel::Draw()
 	}
 }
 
-void AnimationModel::Load( const char* FileName )
+void AnimationModel::Load( const char* fileName )
 {
-	const std::string modelPath( FileName );
+	const std::string modelPath( fileName );
 
-	m_AiScene = aiImportFile( FileName, aiProcessPreset_TargetRealtime_MaxQuality | aiProcess_ConvertToLeftHanded );
+	m_AiScene = aiImportFile( fileName, aiProcessPreset_TargetRealtime_MaxQuality | aiProcess_ConvertToLeftHanded );
 	assert( m_AiScene );
 
 	m_VertexBuffer = new ID3D11Buffer * [ m_AiScene->mNumMeshes ];
@@ -211,11 +211,11 @@ void AnimationModel::Load( const char* FileName )
 
 
 
-void AnimationModel::LoadAnimation( const char* FileName, const char* Name )
+void AnimationModel::LoadAnimation( const char* fileName, const char* name )
 {
 
-	m_Animation[ Name ] = aiImportFile( FileName, aiProcess_ConvertToLeftHanded );
-	assert( m_Animation[ Name ] );
+	m_Animation[ name ] = aiImportFile( fileName, aiProcess_ConvertToLeftHanded );
+	assert( m_Animation[ name ] );
 
 }
 
@@ -264,21 +264,23 @@ void AnimationModel::Uninit()
 	}
 
 }
-
-
-
-
-
-void AnimationModel::Update( const char* AnimationName1, int Frame1 )
+void AnimationModel::Update( const char* animationName1, int frame1, const char* animationName2, int frame2, float blenad )
 {
-	if ( m_Animation.count( AnimationName1 ) == 0 )
+	if ( m_Animation.count( animationName1 ) == 0 )
 		return;
 
-	if ( !m_Animation[ AnimationName1 ]->HasAnimations() )
+	if ( !m_Animation[ animationName1 ]->HasAnimations() )
+		return;
+
+	if ( m_Animation.count( animationName2 ) == 0 )
+		return;
+
+	if ( !m_Animation[ animationName2 ]->HasAnimations() )
 		return;
 
 	//アニメーションデータからボーンマトリクス算出
-	aiAnimation* animation1 = m_Animation[ AnimationName1 ]->mAnimations[ 0 ];
+	aiAnimation* animation1 = m_Animation[ animationName1 ]->mAnimations[ 0 ];
+	aiAnimation* animation2 = m_Animation[ animationName2 ]->mAnimations[ 0 ];
 
 	for ( auto pair : m_Bone )
 	{
@@ -294,24 +296,50 @@ void AnimationModel::Update( const char* AnimationName1, int Frame1 )
 			}
 		}
 
+		aiNodeAnim* nodeAnim2 = nullptr;
+		for ( unsigned int c = 0; c < animation2->mNumChannels; c++ )
+		{
+			if ( animation2->mChannels[ c ]->mNodeName == aiString( pair.first ) )
+			{
+				nodeAnim2 = animation2->mChannels[ c ];
+				break;
+			}
+		}
+
 		int f;
 		aiQuaternion rot1;
 		aiVector3D pos1;
 
 		if ( nodeAnim1 )
 		{
-			f = Frame1 % nodeAnim1->mNumRotationKeys;
+			f = frame1 % nodeAnim1->mNumRotationKeys;
 			rot1 = nodeAnim1->mRotationKeys[ f ].mValue;
 
-			f = Frame1 % nodeAnim1->mNumPositionKeys;
+			f = frame1 % nodeAnim1->mNumPositionKeys;
 			pos1 = nodeAnim1->mPositionKeys[ f ].mValue;
 		}
 
-		bone->AnimationMatrix = aiMatrix4x4( aiVector3D( 1.0f, 1.0f, 1.0f ), rot1, pos1 );
+		aiQuaternion rot2;
+		aiVector3D pos2;
+
+		if ( nodeAnim2 )
+		{
+			f = frame2 % nodeAnim2->mNumRotationKeys;
+			rot2 = nodeAnim2->mRotationKeys[ f ].mValue;
+
+			f = frame2 % nodeAnim2->mNumPositionKeys;
+			pos2 = nodeAnim2->mPositionKeys[ f ].mValue;
+		}
+
+		// 線形補間
+		aiVector3D pos = pos1 * ( 1.0f - blenad ) + pos2 * blenad;
+		aiQuaternion rot;
+		aiQuaternion::Interpolate( rot, rot1, rot2, blenad );
+
+		bone->AnimationMatrix = aiMatrix4x4( aiVector3D( 1.0f, 1.0f, 1.0f ), rot, pos );
 	}
 
 	//再帰的にボーンマトリクスを更新
-
 	aiMatrix4x4 rootMatrix = aiMatrix4x4( aiVector3D( 1.0f, 1.0f, 1.0f ),
 		aiQuaternion( (float)AI_MATH_PI, 0.0f, 0.0f ),
 		aiVector3D( 0.0f, 0.0f, 0.0f ) );

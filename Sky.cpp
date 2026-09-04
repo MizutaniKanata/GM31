@@ -22,13 +22,18 @@ void Sky::Init()
 void Sky::Update()
 {
 	Camera* camera = Manager::GetGameObject<Camera>();
-	m_Position = camera->GetPosition();
+	if ( camera != nullptr )
+	{
+		m_Position = camera->GetPosition();
+	}
 
 	GameObject::Update();
 }
 
 void Sky::Draw()
 {
+	Renderer::SetCullMode( D3D11_CULL_NONE );
+
 	// 入力レイアウト設定
 	Renderer::GetDeviceContext()->IASetInputLayout( m_VertexLayout );
 
@@ -39,13 +44,15 @@ void Sky::Draw()
 	// マトリクス設定
 	XMMATRIX world, scale, rot, trans;
 	scale = XMMatrixScaling( m_Scale.x, m_Scale.y, m_Scale.z );
-	rot = XMMatrixRotationRollPitchYaw( m_Rotation.x, m_Rotation.y + XM_PI, m_Rotation.z );
+	rot = XMMatrixRotationRollPitchYaw( m_Rotation.x, m_Rotation.y, m_Rotation.z );
 	trans = XMMatrixTranslation( m_Position.x, m_Position.y, m_Position.z );
 	world = scale * rot * trans;
 
 	Renderer::SetWorldMatrix( world );
 
 	GameObject::Draw(); // 継承元のDraw()を呼び出す
+
+	Renderer::SetCullMode( D3D11_CULL_BACK );
 }
 
 void Sky::Uninit()

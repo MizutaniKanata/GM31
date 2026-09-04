@@ -17,8 +17,8 @@ struct DEFORM_VERTEX
 	aiVector3D Position;
 	aiVector3D Normal;
 	int				BoneNum;
-	std::string		BoneName[4];//本来はボーンインデックスで管理するべき
-	float			BoneWeight[4];
+	std::string		BoneName[ 4 ];//本来はボーンインデックスで管理するべき
+	float			BoneWeight[ 4 ];
 };
 
 //ボーン構造体
@@ -35,23 +35,23 @@ private:
 	const aiScene* m_AiScene = nullptr;
 	std::unordered_map<std::string, const aiScene*> m_Animation;
 
-	ID3D11Buffer**	m_VertexBuffer;
-	ID3D11Buffer**	m_IndexBuffer;
+	ID3D11Buffer** m_VertexBuffer;
+	ID3D11Buffer** m_IndexBuffer;
 
 	std::unordered_map<std::string, ID3D11ShaderResourceView*> m_Texture;
 
 	std::vector<DEFORM_VERTEX>* m_DeformVertex;//変形後頂点データ
 	std::unordered_map<std::string, BONE> m_Bone;//ボーンデータ（名前で参照）
 
-	void CreateBone(aiNode* Node);
-	void UpdateBoneMatrix(aiNode* Node, aiMatrix4x4 Matrix);
+	void CreateBone( aiNode* node );
+	void UpdateBoneMatrix( aiNode* node, aiMatrix4x4 matrix );
 
 public:
 	using Component::Component;
 
-	void Load( const char *FileName );
-	void LoadAnimation( const char *FileName, const char *Name );
+	void Load( const char* fileName );
+	void LoadAnimation( const char* fileName, const char* name );
 	void Uninit() override;
-	void Update(const char* AnimationName1, int Frame1);
+	void Update( const char* animationName1, int frame1, const char* animationName2, int frame2, float blend );
 	void Draw() override;
 };

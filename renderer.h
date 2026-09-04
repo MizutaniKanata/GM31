@@ -60,18 +60,19 @@ public:
 	static void Begin();
 	static void End();
 
-	static void SetDepthEnable( bool Enable );
-	static void SetATCEnable( bool Enable );
+	static void SetDepthEnable( bool isEnable );
+	static void SetATCEnable( bool isEnable );
 	static void SetWorldViewProjection2D();
-	static void SetWorldMatrix( XMMATRIX WorldMatrix );
-	static void SetViewMatrix( XMMATRIX ViewMatrix );
-	static void SetProjectionMatrix( XMMATRIX ProjectionMatrix );
-	static void SetMaterial( MATERIAL Material );
-	static void SetLight( LIGHT Light );
+	static void SetWorldMatrix( XMMATRIX worldMatrix );
+	static void SetViewMatrix( XMMATRIX viewMatrix );
+	static void SetProjectionMatrix( XMMATRIX projectionMatrix );
+	static void SetMaterial( MATERIAL material );
+	static void SetLight( LIGHT light );
+	static void SetCullMode( D3D11_CULL_MODE cullMode );
 
 	static ID3D11Device* GetDevice( void ) { return m_Device; }
 	static ID3D11DeviceContext* GetDeviceContext( void ) { return m_DeviceContext; }
 
-	static void CreateVertexShader( ID3D11VertexShader** VertexShader, ID3D11InputLayout** VertexLayout, const char* FileName );
-	static void CreatePixelShader( ID3D11PixelShader** PixelShader, const char* FileName );
+	static void CreateVertexShader( ID3D11VertexShader** vertexShader, ID3D11InputLayout** vertexLayout, const char* fileName );
+	static void CreatePixelShader( ID3D11PixelShader** pixelShader, const char* fileName );
 };
